@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/gdamore/tcell"
-	runewidth "github.com/mattn/go-runewidth"
 )
 
 // listItem represents one item in a List.
@@ -70,7 +69,8 @@ func NewList() *List {
 	}
 }
 
-// SetCurrentItem sets the currently selected item by its index.
+// SetCurrentItem sets the currently selected item by its index. This triggers
+// a "changed" event.
 func (l *List) SetCurrentItem(index int) *List {
 	l.currentItem = index
 	if l.currentItem < len(l.items) && l.changed != nil {
@@ -78,6 +78,11 @@ func (l *List) SetCurrentItem(index int) *List {
 		l.changed(l.currentItem, item.MainText, item.SecondaryText, item.Shortcut)
 	}
 	return l
+}
+
+// GetCurrentItem returns the index of the currently selected list item.
+func (l *List) GetCurrentItem() int {
+	return l.currentItem
 }
 
 // SetMainTextColor sets the color of the items' main text.
@@ -168,6 +173,26 @@ func (l *List) AddItem(mainText, secondaryText string, shortcut rune, selected f
 	return l
 }
 
+// GetItemCount returns the number of items in the list.
+func (l *List) GetItemCount() int {
+	return len(l.items)
+}
+
+// GetItemText returns an item's texts (main and secondary). Panics if the index
+// is out of range.
+func (l *List) GetItemText(index int) (main, secondary string) {
+	return l.items[index].MainText, l.items[index].SecondaryText
+}
+
+// SetItemText sets an item's main and secondary text. Panics if the index is
+// out of range.
+func (l *List) SetItemText(index int, main, secondary string) *List {
+	item := l.items[index]
+	item.MainText = main
+	item.SecondaryText = secondary
+	return l
+}
+
 // Clear removes all items from the list.
 func (l *List) Clear() *List {
 	l.items = nil
@@ -194,8 +219,24 @@ func (l *List) Draw(screen tcell.Screen) {
 		}
 	}
 
+	// We want to keep the current selection in view. What is our offset?
+	var offset int
+	if l.showSecondaryText {
+		if 2*l.currentItem >= height {
+			offset = (2*l.currentItem + 2 - height) / 2
+		}
+	} else {
+		if l.currentItem >= height {
+			offset = l.currentItem + 1 - height
+		}
+	}
+
 	// Draw the list items.
 	for index, item := range l.items {
+		if index < offset {
+			continue
+		}
+
 		if y >= bottomLimit {
 			break
 		}
@@ -206,16 +247,22 @@ func (l *List) Draw(screen tcell.Screen) {
 		}
 
 		// Main text.
-		color := l.mainTextColor
+		Print(screen, item.MainText, x, y, width, AlignLeft, l.mainTextColor)
+
+		// Background color of selected text.
 		if index == l.currentItem {
-			textLength := runewidth.StringWidth(item.MainText)
-			style := tcell.StyleDefault.Background(l.selectedBackgroundColor)
-			for bx := 0; bx < textLength && bx < width; bx++ {
-				screen.SetContent(x+bx, y, ' ', nil, style)
+			textWidth := StringWidth(item.MainText)
+			for bx := 0; bx < textWidth && bx < width; bx++ {
+				m, c, style, _ := screen.GetContent(x+bx, y)
+				fg, _, _ := style.Decompose()
+				if fg == l.mainTextColor {
+					fg = l.selectedTextColor
+				}
+				style = style.Background(l.selectedBackgroundColor).Foreground(fg)
+				screen.SetContent(x+bx, y, m, c, style)
 			}
-			color = l.selectedTextColor
 		}
-		Print(screen, item.MainText, x, y, width, AlignLeft, color)
+
 		y++
 
 		if y >= bottomLimit {
@@ -232,7 +279,7 @@ func (l *List) Draw(screen tcell.Screen) {
 
 // InputHandler returns the handler for this primitive.
 func (l *List) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
-	return func(event *tcell.EventKey, setFocus func(p Primitive)) {
+	return l.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) {
 		previousItem := l.currentItem
 
 		switch key := event.Key(); key {
@@ -249,12 +296,14 @@ func (l *List) InputHandler() func(event *tcell.EventKey, setFocus func(p Primit
 		case tcell.KeyPgUp:
 			l.currentItem -= 5
 		case tcell.KeyEnter:
-			item := l.items[l.currentItem]
-			if item.Selected != nil {
-				item.Selected()
-			}
-			if l.selected != nil {
-				l.selected(l.currentItem, item.MainText, item.SecondaryText, item.Shortcut)
+			if l.currentItem >= 0 && l.currentItem < len(l.items) {
+				item := l.items[l.currentItem]
+				if item.Selected != nil {
+					item.Selected()
+				}
+				if l.selected != nil {
+					l.selected(l.currentItem, item.MainText, item.SecondaryText, item.Shortcut)
+				}
 			}
 		case tcell.KeyEscape:
 			if l.done != nil {
@@ -296,5 +345,5 @@ func (l *List) InputHandler() func(event *tcell.EventKey, setFocus func(p Primit
 			item := l.items[l.currentItem]
 			l.changed(l.currentItem, item.MainText, item.SecondaryText, item.Shortcut)
 		}
-	}
+	})
 }

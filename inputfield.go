@@ -26,6 +26,9 @@ type InputField struct {
 	// The text to be displayed before the input area.
 	label string
 
+	// The text to be displayed in the input area when "text" is empty.
+	placeholder string
+
 	// The label color.
 	labelColor tcell.Color
 
@@ -35,9 +38,16 @@ type InputField struct {
 	// The text color of the input area.
 	fieldTextColor tcell.Color
 
-	// The length of the input area. A value of 0 means extend as much as
+	// The text color of the placeholder.
+	placeholderTextColor tcell.Color
+
+	// The screen width of the label area. A value of 0 means use the width of
+	// the label text.
+	labelWidth int
+
+	// The screen width of the input area. A value of 0 means extend as much as
 	// possible.
-	fieldLength int
+	fieldWidth int
 
 	// A character to mask entered text (useful for password fields). A value of 0
 	// disables masking.
@@ -53,6 +63,10 @@ type InputField struct {
 	// are done entering text. The key which was pressed is provided (tab,
 	// shift-tab, enter, or escape).
 	done func(tcell.Key)
+
+	// A callback function set by the Form class and called when the user leaves
+	// this form item.
+	finished func(tcell.Key)
 }
 
 // NewInputField returns a new input field.
@@ -62,6 +76,7 @@ func NewInputField() *InputField {
 		labelColor:           Styles.SecondaryTextColor,
 		fieldBackgroundColor: Styles.ContrastBackgroundColor,
 		fieldTextColor:       Styles.PrimaryTextColor,
+		placeholderTextColor: Styles.ContrastSecondaryTextColor,
 	}
 }
 
@@ -90,6 +105,19 @@ func (i *InputField) GetLabel() string {
 	return i.label
 }
 
+// SetLabelWidth sets the screen width of the label. A value of 0 will cause the
+// primitive to use the width of the label string.
+func (i *InputField) SetLabelWidth(width int) *InputField {
+	i.labelWidth = width
+	return i
+}
+
+// SetPlaceholder sets the text to be displayed when the input text is empty.
+func (i *InputField) SetPlaceholder(text string) *InputField {
+	i.placeholder = text
+	return i
+}
+
 // SetLabelColor sets the color of the label.
 func (i *InputField) SetLabelColor(color tcell.Color) *InputField {
 	i.labelColor = color
@@ -108,9 +136,15 @@ func (i *InputField) SetFieldTextColor(color tcell.Color) *InputField {
 	return i
 }
 
+// SetPlaceholderTextColor sets the text color of placeholder text.
+func (i *InputField) SetPlaceholderTextColor(color tcell.Color) *InputField {
+	i.placeholderTextColor = color
+	return i
+}
+
 // SetFormAttributes sets attributes shared by all form items.
-func (i *InputField) SetFormAttributes(label string, labelColor, bgColor, fieldTextColor, fieldBgColor tcell.Color) FormItem {
-	i.label = label
+func (i *InputField) SetFormAttributes(labelWidth int, labelColor, bgColor, fieldTextColor, fieldBgColor tcell.Color) FormItem {
+	i.labelWidth = labelWidth
 	i.labelColor = labelColor
 	i.backgroundColor = bgColor
 	i.fieldTextColor = fieldTextColor
@@ -118,11 +152,16 @@ func (i *InputField) SetFormAttributes(label string, labelColor, bgColor, fieldT
 	return i
 }
 
-// SetFieldLength sets the length of the input area. A value of 0 means extend
-// as much as possible.
-func (i *InputField) SetFieldLength(length int) *InputField {
-	i.fieldLength = length
+// SetFieldWidth sets the screen width of the input area. A value of 0 means
+// extend as much as possible.
+func (i *InputField) SetFieldWidth(width int) *InputField {
+	i.fieldWidth = width
 	return i
+}
+
+// GetFieldWidth returns this primitive's field width.
+func (i *InputField) GetFieldWidth() int {
+	return i.fieldWidth
 }
 
 // SetMaskCharacter sets a character that masks user input on a screen. A value
@@ -162,9 +201,10 @@ func (i *InputField) SetDoneFunc(handler func(key tcell.Key)) *InputField {
 	return i
 }
 
-// SetFinishedFunc calls SetDoneFunc().
+// SetFinishedFunc sets a callback invoked when the user leaves this form item.
 func (i *InputField) SetFinishedFunc(handler func(key tcell.Key)) FormItem {
-	return i.SetDoneFunc(handler)
+	i.finished = handler
+	return i
 }
 
 // Draw draws this primitive onto the screen.
@@ -179,32 +219,48 @@ func (i *InputField) Draw(screen tcell.Screen) {
 	}
 
 	// Draw label.
-	_, drawnWidth := Print(screen, i.label, x, y, rightLimit-x, AlignLeft, i.labelColor)
-	x += drawnWidth
+	if i.labelWidth > 0 {
+		labelWidth := i.labelWidth
+		if labelWidth > rightLimit-x {
+			labelWidth = rightLimit - x
+		}
+		Print(screen, i.label, x, y, labelWidth, AlignLeft, i.labelColor)
+		x += labelWidth
+	} else {
+		_, drawnWidth := Print(screen, i.label, x, y, rightLimit-x, AlignLeft, i.labelColor)
+		x += drawnWidth
+	}
 
 	// Draw input area.
-	fieldLength := i.fieldLength
-	if fieldLength == 0 {
-		fieldLength = math.MaxInt64
+	fieldWidth := i.fieldWidth
+	if fieldWidth == 0 {
+		fieldWidth = math.MaxInt32
 	}
-	if rightLimit-x < fieldLength {
-		fieldLength = rightLimit - x
+	if rightLimit-x < fieldWidth {
+		fieldWidth = rightLimit - x
 	}
 	fieldStyle := tcell.StyleDefault.Background(i.fieldBackgroundColor)
-	for index := 0; index < fieldLength; index++ {
+	for index := 0; index < fieldWidth; index++ {
 		screen.SetContent(x+index, y, ' ', nil, fieldStyle)
 	}
 
-	// Draw entered text.
+	// Draw placeholder text.
 	text := i.text
-	if i.maskCharacter > 0 {
-		text = strings.Repeat(string(i.maskCharacter), utf8.RuneCountInString(i.text))
-	}
-	fieldLength-- // We need one cell for the cursor.
-	if fieldLength < runewidth.StringWidth(i.text) {
-		Print(screen, text, x, y, fieldLength, AlignRight, i.fieldTextColor)
+	if text == "" && i.placeholder != "" {
+		Print(screen, i.placeholder, x, y, fieldWidth, AlignLeft, i.placeholderTextColor)
 	} else {
-		Print(screen, text, x, y, fieldLength, AlignLeft, i.fieldTextColor)
+		// Draw entered text.
+		if i.maskCharacter > 0 {
+			text = strings.Repeat(string(i.maskCharacter), utf8.RuneCountInString(i.text))
+		} else {
+			text = Escape(text)
+		}
+		fieldWidth-- // We need one cell for the cursor.
+		if fieldWidth < runewidth.StringWidth(text) {
+			Print(screen, text, x, y, fieldWidth, AlignRight, i.fieldTextColor)
+		} else {
+			Print(screen, text, x, y, fieldWidth, AlignLeft, i.fieldTextColor)
+		}
 	}
 
 	// Set cursor.
@@ -223,11 +279,15 @@ func (i *InputField) setCursor(screen tcell.Screen) {
 		y++
 		rightLimit -= 2
 	}
-	fieldLength := runewidth.StringWidth(i.text)
-	if i.fieldLength > 0 && fieldLength > i.fieldLength-1 {
-		fieldLength = i.fieldLength - 1
+	fieldWidth := runewidth.StringWidth(i.text)
+	if i.fieldWidth > 0 && fieldWidth > i.fieldWidth-1 {
+		fieldWidth = i.fieldWidth - 1
 	}
-	x += runewidth.StringWidth(i.label) + fieldLength
+	if i.labelWidth > 0 {
+		x += i.labelWidth + fieldWidth
+	} else {
+		x += StringWidth(i.label) + fieldWidth
+	}
 	if x >= rightLimit {
 		x = rightLimit - 1
 	}
@@ -236,7 +296,7 @@ func (i *InputField) setCursor(screen tcell.Screen) {
 
 // InputHandler returns the handler for this primitive.
 func (i *InputField) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
-	return func(event *tcell.EventKey, setFocus func(p Primitive)) {
+	return i.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) {
 		// Trigger changed events.
 		currentText := i.text
 		defer func() {
@@ -270,6 +330,9 @@ func (i *InputField) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 			if i.done != nil {
 				i.done(key)
 			}
+			if i.finished != nil {
+				i.finished(key)
+			}
 		}
-	}
+	})
 }

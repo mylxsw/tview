@@ -1,6 +1,8 @@
 package tview
 
 import (
+	"fmt"
+	"os"
 	"sync"
 
 	"github.com/gdamore/tcell"
@@ -24,58 +26,48 @@ type Application struct {
 	root Primitive
 
 	// Whether or not the application resizes the root primitive.
-	rootAutoSize bool
+	rootFullscreen bool
 
-	// Key overrides.
-	keyOverrides map[tcell.Key]func(p Primitive) bool
+	// An optional capture function which receives a key event and returns the
+	// event to be forwarded to the default input handler (nil if nothing should
+	// be forwarded).
+	inputCapture func(event *tcell.EventKey) *tcell.EventKey
 
-	// Rune overrides.
-	runeOverrides map[rune]func(p Primitive) bool
+	// An optional callback function which is invoked just before the root
+	// primitive is drawn.
+	beforeDraw func(screen tcell.Screen) bool
+
+	// An optional callback function which is invoked after the root primitive
+	// was drawn.
+	afterDraw func(screen tcell.Screen)
+
+	// If this value is true, the application has entered suspended mode.
+	suspended bool
 }
 
 // NewApplication creates and returns a new application.
 func NewApplication() *Application {
-	return &Application{
-		keyOverrides:  make(map[tcell.Key]func(p Primitive) bool),
-		runeOverrides: make(map[rune]func(p Primitive) bool),
-	}
+	return &Application{}
 }
 
-// SetKeyCapture installs a global capture function for the given key. It
-// intercepts all events for the given key and routes them to the handler.
-// The handler receives the Primitive to which the key is originally redirected,
-// the one which has focus, or nil if it was not directed to a Primitive. The
-// handler also returns whether or not the key event is then forwarded to that
-// Primitive.
+// SetInputCapture sets a function which captures all key events before they are
+// forwarded to the key event handler of the primitive which currently has
+// focus. This function can then choose to forward that key event (or a
+// different one) by returning it or stop the key event processing by returning
+// nil.
 //
-// Special keys (e.g. Escape, Enter, or Ctrl-A) are defined by the "key"
-// argument. The "ch" rune is ignored. Other keys (e.g. "a", "h", or "5") are
-// specified by their rune, with key set to tcell.KeyRune. See also
-// https://godoc.org/github.com/gdamore/tcell#EventKey for more information.
-//
-// To remove a handler again, provide a nil handler for the same key.
-//
-// The application itself will exit when Ctrl-C is pressed. You can intercept
-// this with this function as well.
-func (a *Application) SetKeyCapture(key tcell.Key, ch rune, handler func(p Primitive) bool) *Application {
-	if key == tcell.KeyRune {
-		if handler != nil {
-			a.runeOverrides[ch] = handler
-		} else {
-			if _, ok := a.runeOverrides[ch]; ok {
-				delete(a.runeOverrides, ch)
-			}
-		}
-	} else {
-		if handler != nil {
-			a.keyOverrides[key] = handler
-		} else {
-			if _, ok := a.keyOverrides[key]; ok {
-				delete(a.keyOverrides, key)
-			}
-		}
-	}
+// Note that this also affects the default event handling of the application
+// itself: Such a handler can intercept the Ctrl-C event which closes the
+// applicatoon.
+func (a *Application) SetInputCapture(capture func(event *tcell.EventKey) *tcell.EventKey) *Application {
+	a.inputCapture = capture
 	return a
+}
+
+// GetInputCapture returns the function installed with SetInputCapture() or nil
+// if no such function has been installed.
+func (a *Application) GetInputCapture() func(event *tcell.EventKey) *tcell.EventKey {
+	return a.inputCapture
 }
 
 // Run starts the application and thus the event loop. This function returns
@@ -111,9 +103,12 @@ func (a *Application) Run() error {
 
 	// Start event loop.
 	for {
-		a.RLock()
+		a.Lock()
 		screen := a.screen
-		a.RUnlock()
+		if a.suspended {
+			a.suspended = false // Clear previous suspended flag.
+		}
+		a.Unlock()
 		if screen == nil {
 			break
 		}
@@ -121,7 +116,17 @@ func (a *Application) Run() error {
 		// Wait for next event.
 		event := a.screen.PollEvent()
 		if event == nil {
-			break // The screen was finalized.
+			a.Lock()
+			if a.suspended {
+				// This screen was renewed due to suspended mode.
+				a.suspended = false
+				a.Unlock()
+				continue // Resume.
+			}
+			a.Unlock()
+
+			// The screen was finalized. Exit the loop.
+			break
 		}
 
 		switch event := event.(type) {
@@ -131,21 +136,10 @@ func (a *Application) Run() error {
 			a.RUnlock()
 
 			// Intercept keys.
-			if event.Key() == tcell.KeyRune {
-				if handler, ok := a.runeOverrides[event.Rune()]; ok {
-					if !handler(p) {
-						break
-					}
-				}
-			} else {
-				if handler, ok := a.keyOverrides[event.Key()]; ok {
-					pr := p
-					if event.Key() == tcell.KeyCtrlC {
-						pr = nil
-					}
-					if !handler(pr) {
-						break
-					}
+			if a.inputCapture != nil {
+				event = a.inputCapture(event)
+				if event == nil {
+					break // Don't forward event.
 				}
 			}
 
@@ -164,13 +158,10 @@ func (a *Application) Run() error {
 				}
 			}
 		case *tcell.EventResize:
-			if a.rootAutoSize && a.root != nil {
-				a.Lock()
-				width, height := a.screen.Size()
-				a.root.SetRect(0, 0, width, height)
-				a.Unlock()
-				a.Draw()
-			}
+			a.Lock()
+			screen := a.screen
+			a.Unlock()
+			screen.Clear()
 			a.Draw()
 		}
 	}
@@ -189,41 +180,147 @@ func (a *Application) Stop() {
 	a.screen = nil
 }
 
+// Suspend temporarily suspends the application by exiting terminal UI mode and
+// invoking the provided function "f". When "f" returns, terminal UI mode is
+// entered again and the application resumes.
+//
+// A return value of true indicates that the application was suspended and "f"
+// was called. If false is returned, the application was already suspended,
+// terminal UI mode was not exited, and "f" was not called.
+func (a *Application) Suspend(f func()) bool {
+	a.Lock()
+
+	if a.suspended || a.screen == nil {
+		// Application is already suspended.
+		a.Unlock()
+		return false
+	}
+
+	// Enter suspended mode.
+	a.suspended = true
+	a.Unlock()
+	a.Stop()
+
+	// Deal with panics during suspended mode. Exit the program.
+	defer func() {
+		if p := recover(); p != nil {
+			fmt.Println(p)
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for "f" to return.
+	f()
+
+	// Make a new screen and redraw.
+	a.Lock()
+	var err error
+	a.screen, err = tcell.NewScreen()
+	if err != nil {
+		a.Unlock()
+		panic(err)
+	}
+	if err = a.screen.Init(); err != nil {
+		a.Unlock()
+		panic(err)
+	}
+	a.Unlock()
+	a.Draw()
+
+	// Continue application loop.
+	return true
+}
+
 // Draw refreshes the screen. It calls the Draw() function of the application's
 // root primitive and then syncs the screen buffer.
 func (a *Application) Draw() *Application {
 	a.RLock()
-	defer a.RUnlock()
+	screen := a.screen
+	root := a.root
+	fullscreen := a.rootFullscreen
+	before := a.beforeDraw
+	after := a.afterDraw
+	a.RUnlock()
 
 	// Maybe we're not ready yet or not anymore.
-	if a.screen == nil || a.root == nil {
+	if screen == nil || root == nil {
 		return a
 	}
 
 	// Resize if requested.
-	if a.rootAutoSize && a.root != nil {
-		width, height := a.screen.Size()
-		a.root.SetRect(0, 0, width, height)
+	if fullscreen && root != nil {
+		width, height := screen.Size()
+		root.SetRect(0, 0, width, height)
+	}
+
+	// Call before handler if there is one.
+	if before != nil {
+		if before(screen) {
+			screen.Show()
+			return a
+		}
 	}
 
 	// Draw all primitives.
-	a.root.Draw(a.screen)
+	root.Draw(screen)
+
+	// Call after handler if there is one.
+	if after != nil {
+		after(screen)
+	}
 
 	// Sync screen.
-	a.screen.Show()
+	screen.Show()
 
 	return a
 }
 
-// SetRoot sets the root primitive for this application. This function must be
-// called or nothing will be displayed when the application starts.
+// SetBeforeDrawFunc installs a callback function which is invoked just before
+// the root primitive is drawn during screen updates. If the function returns
+// true, drawing will not continue, i.e. the root primitive will not be drawn
+// (and an after-draw-handler will not be called).
+//
+// Note that the screen is not cleared by the application. To clear the screen,
+// you may call screen.Clear().
+//
+// Provide nil to uninstall the callback function.
+func (a *Application) SetBeforeDrawFunc(handler func(screen tcell.Screen) bool) *Application {
+	a.beforeDraw = handler
+	return a
+}
+
+// GetBeforeDrawFunc returns the callback function installed with
+// SetBeforeDrawFunc() or nil if none has been installed.
+func (a *Application) GetBeforeDrawFunc() func(screen tcell.Screen) bool {
+	return a.beforeDraw
+}
+
+// SetAfterDrawFunc installs a callback function which is invoked after the root
+// primitive was drawn during screen updates.
+//
+// Provide nil to uninstall the callback function.
+func (a *Application) SetAfterDrawFunc(handler func(screen tcell.Screen)) *Application {
+	a.afterDraw = handler
+	return a
+}
+
+// GetAfterDrawFunc returns the callback function installed with
+// SetAfterDrawFunc() or nil if none has been installed.
+func (a *Application) GetAfterDrawFunc() func(screen tcell.Screen) {
+	return a.afterDraw
+}
+
+// SetRoot sets the root primitive for this application. If "fullscreen" is set
+// to true, the root primitive's position will be changed to fill the screen.
+//
+// This function must be called at least once or nothing will be displayed when
+// the application starts.
 //
 // It also calls SetFocus() on the primitive.
-func (a *Application) SetRoot(root Primitive, autoSize bool) *Application {
-
+func (a *Application) SetRoot(root Primitive, fullscreen bool) *Application {
 	a.Lock()
 	a.root = root
-	a.rootAutoSize = autoSize
+	a.rootFullscreen = fullscreen
 	if a.screen != nil {
 		a.screen.Clear()
 	}
@@ -260,9 +357,11 @@ func (a *Application) SetFocus(p Primitive) *Application {
 		a.screen.HideCursor()
 	}
 	a.Unlock()
-	p.Focus(func(p Primitive) {
-		a.SetFocus(p)
-	})
+	if p != nil {
+		p.Focus(func(p Primitive) {
+			a.SetFocus(p)
+		})
+	}
 
 	return a
 }

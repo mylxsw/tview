@@ -7,10 +7,12 @@ Widgets
 
 The package implements the following widgets:
 
-  - TextView: Scrollable windows that display multi-colored text. Text may also
+  - TextView: A scrollable window that display multi-colored text. Text may also
     be highlighted.
-  - Table: Scrollable display of tabular data. Table cells, rows, or columns may
-    also be highlighted.
+  - Table: A scrollable display of tabular data. Table cells, rows, or columns
+    may also be highlighted.
+  - TreeView: A scrollable display for hierarchical data. Tree nodes can be
+    highlighted, collapsed, expanded, and more.
   - List: A navigable text list with optional keyboard shortcuts.
   - InputField: One-line input fields to enter text.
   - DropDown: Drop-down selection fields.
@@ -59,6 +61,72 @@ You will find more demos in the "demos" subdirectory. It also contains a
 presentation (written using tview) which gives an overview of the different
 widgets and how they can be used.
 
+Colors
+
+Throughout this package, colors are specified using the tcell.Color type.
+Functions such as tcell.GetColor(), tcell.NewHexColor(), and tcell.NewRGBColor()
+can be used to create colors from W3C color names or RGB values.
+
+Almost all strings which are displayed can contain color tags. Color tags are
+W3C color names or six hexadecimal digits following a hash tag, wrapped in
+square brackets. Examples:
+
+  This is a [red]warning[white]!
+  The sky is [#8080ff]blue[#ffffff].
+
+A color tag changes the color of the characters following that color tag. This
+applies to almost everything from box titles, list text, form item labels, to
+table cells. In a TextView, this functionality has to be switched on explicitly.
+See the TextView documentation for more information.
+
+Color tags may contain not just the foreground (text) color but also the
+background color and additional flags. In fact, the full definition of a color
+tag is as follows:
+
+  [<foreground>:<background>:<flags>]
+
+Each of the three fields can be left blank and trailing fields can be omitted.
+(Empty square brackets "[]", however, are not considered color tags.) Colors
+that are not specified will be left unchanged. A field with just a dash ("-")
+means "reset to default".
+
+You can specify the following flags (some flags may not be supported by your
+terminal):
+
+  l: blink
+  b: bold
+  d: dim
+  r: reverse (switch foreground and background color)
+  u: underline
+
+Examples:
+
+  [yellow]Yellow text
+  [yellow:red]Yellow text on red background
+  [:red]Red background, text color unchanged
+  [yellow::u]Yellow text underlined
+  [::bl]Bold, blinking text
+  [::-]Colors unchanged, flags reset
+  [-]Reset foreground color
+  [-:-:-]Reset everything
+  [:]No effect
+  []Not a valid color tag, will print square brackets as they are
+
+In the rare event that you want to display a string such as "[red]" or
+"[#00ff1a]" without applying its effect, you need to put an opening square
+bracket before the closing square bracket. Note that the text inside the
+brackets will be matched less strictly than region or colors tags. I.e. any
+character that may be used in color or region tags will be recognized. Examples:
+
+  [red[]      will be output as [red]
+  ["123"[]    will be output as ["123"]
+  [#6aff00[[] will be output as [#6aff00[]
+  [a#"[[[]    will be output as [a#"[[]
+  []          will be output as [] (see color tags above)
+  [[]         will be output as [[] (not an escaped tag)
+
+You can use the Escape() function to insert brackets automatically where needed.
+
 Styles
 
 When primitives are instantiated, they are initialized with colors taken from
@@ -77,8 +145,8 @@ therefore available for all widgets, too.
 All widgets also implement the Primitive interface. There is also the Focusable
 interface which is used to override functions in subclassing types.
 
-The tview package is based on github.com/gdamore/tcell. It uses types and
-constants from that package (e.g. colors and keyboard values).
+The tview package is based on https://github.com/gdamore/tcell. It uses types
+and constants from that package (e.g. colors and keyboard values).
 
 This package does not process mouse input (yet).
 */

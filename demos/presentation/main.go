@@ -40,7 +40,10 @@ func main() {
 		TextView1,
 		TextView2,
 		Table,
+		TreeView,
 		Flex,
+		Grid,
+		Colors,
 		End,
 	}
 
@@ -56,18 +59,20 @@ func main() {
 	pages := tview.NewPages()
 	previousSlide := func() {
 		currentSlide = (currentSlide - 1 + len(slides)) % len(slides)
-		info.Highlight(strconv.Itoa(currentSlide))
+		info.Highlight(strconv.Itoa(currentSlide)).
+			ScrollToHighlight()
 		pages.SwitchToPage(strconv.Itoa(currentSlide))
 	}
 	nextSlide := func() {
 		currentSlide = (currentSlide + 1) % len(slides)
-		info.Highlight(strconv.Itoa(currentSlide))
+		info.Highlight(strconv.Itoa(currentSlide)).
+			ScrollToHighlight()
 		pages.SwitchToPage(strconv.Itoa(currentSlide))
 	}
 	for index, slide := range slides {
 		title, primitive := slide(nextSlide)
 		pages.AddPage(strconv.Itoa(index), primitive, true, index == currentSlide)
-		fmt.Fprintf(info, `%d ["%d"][cyan]%s[white][""]  `, index+1, index, title)
+		fmt.Fprintf(info, `%d ["%d"][darkcyan]%s[white][""]  `, index+1, index, title)
 	}
 
 	// Create the main layout.
@@ -77,16 +82,17 @@ func main() {
 		AddItem(info, 1, 1, false)
 
 	// Shortcuts to navigate the slides.
-	app.SetKeyCapture(tcell.KeyCtrlN, 0, func(p tview.Primitive) bool {
-		nextSlide()
-		return false
-	}).SetKeyCapture(tcell.KeyCtrlP, 0, func(p tview.Primitive) bool {
-		previousSlide()
-		return false
+	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyCtrlN {
+			nextSlide()
+		} else if event.Key() == tcell.KeyCtrlP {
+			previousSlide()
+		}
+		return event
 	})
 
 	// Start the application.
-	if err := app.SetRoot(layout, true).SetFocus(layout).Run(); err != nil {
+	if err := app.SetRoot(layout, true).Run(); err != nil {
 		panic(err)
 	}
 }

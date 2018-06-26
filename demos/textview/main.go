@@ -24,6 +24,7 @@ func main() {
 	textView := tview.NewTextView().
 		SetDynamicColors(true).
 		SetRegions(true).
+		SetWordWrap(true).
 		SetChangedFunc(func() {
 			app.Draw()
 		})
@@ -31,7 +32,7 @@ func main() {
 	go func() {
 		for _, word := range strings.Split(corporate, " ") {
 			if word == "the" {
-				word = "[red]the[white]"
+				word = "[#ff0000]the[white]"
 			}
 			if word == "to" {
 				word = fmt.Sprintf(`["%d"]to[""]`, numSelections)
@@ -62,7 +63,7 @@ func main() {
 		}
 	})
 	textView.SetBorder(true)
-	if err := app.SetRoot(textView, true).SetFocus(textView).Run(); err != nil {
+	if err := app.SetRoot(textView, true).Run(); err != nil {
 		panic(err)
 	}
 }

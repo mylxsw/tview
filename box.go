@@ -2,17 +2,22 @@ package tview
 
 import (
 	"github.com/gdamore/tcell"
-	runewidth "github.com/mattn/go-runewidth"
 )
 
 // Box implements Primitive with a background and optional elements such as a
 // border and a title. Most subclasses keep their content contained in the box
 // but don't necessarily have to.
 //
+// Note that all classes which subclass from Box will also have access to its
+// functions.
+//
 // See https://github.com/rivo/tview/wiki/Box for an example.
 type Box struct {
 	// The position of the rect.
 	x, y, width, height int
+
+	// The inner rect reserved for the box's content.
+	innerX, innerY, innerWidth, innerHeight int
 
 	// Border padding.
 	paddingTop, paddingBottom, paddingLeft, paddingRight int
@@ -42,6 +47,18 @@ type Box struct {
 
 	// Whether or not this box has focus.
 	hasFocus bool
+
+	// If set to true, the inner rect of this box will be within the screen at the
+	// last time the box was drawn.
+	clampToScreen bool
+
+	// An optional capture function which receives a key event and returns the
+	// event to be forwarded to the primitive's default input handler (nil if
+	// nothing should be forwarded).
+	inputCapture func(event *tcell.EventKey) *tcell.EventKey
+
+	// An optional function which is called before the box is drawn.
+	draw func(screen tcell.Screen, x, y, width, height int) (int, int, int, int)
 }
 
 // NewBox returns a Box without a border.
@@ -49,10 +66,12 @@ func NewBox() *Box {
 	b := &Box{
 		width:           15,
 		height:          10,
+		innerX:          -1, // Mark as uninitialized.
 		backgroundColor: Styles.PrimitiveBackgroundColor,
 		borderColor:     Styles.BorderColor,
 		titleColor:      Styles.TitleColor,
 		titleAlign:      AlignCenter,
+		clampToScreen:   true,
 	}
 	b.focus = b
 	return b
@@ -70,9 +89,12 @@ func (b *Box) GetRect() (int, int, int, int) {
 	return b.x, b.y, b.width, b.height
 }
 
-// GetInnerRect returns the position of the inner rectangle, without the border
-// and without any padding.
+// GetInnerRect returns the position of the inner rectangle (x, y, width,
+// height), without the border and without any padding.
 func (b *Box) GetInnerRect() (int, int, int, int) {
+	if b.innerX >= 0 {
+		return b.innerX, b.innerY, b.innerWidth, b.innerHeight
+	}
 	x, y, width, height := b.GetRect()
 	if b.border {
 		x++
@@ -86,7 +108,7 @@ func (b *Box) GetInnerRect() (int, int, int, int) {
 		height - b.paddingTop - b.paddingBottom
 }
 
-// SetRect sets a new position of the rectangle.
+// SetRect sets a new position of the primitive.
 func (b *Box) SetRect(x, y, width, height int) {
 	b.x = x
 	b.y = y
@@ -94,9 +116,62 @@ func (b *Box) SetRect(x, y, width, height int) {
 	b.height = height
 }
 
+// SetDrawFunc sets a callback function which is invoked after the box primitive
+// has been drawn. This allows you to add a more individual style to the box
+// (and all primitives which extend it).
+//
+// The function is provided with the box's dimensions (set via SetRect()). It
+// must return the box's inner dimensions (x, y, width, height) which will be
+// returned by GetInnerRect(), used by descendent primitives to draw their own
+// content.
+func (b *Box) SetDrawFunc(handler func(screen tcell.Screen, x, y, width, height int) (int, int, int, int)) *Box {
+	b.draw = handler
+	return b
+}
+
+// GetDrawFunc returns the callback function which was installed with
+// SetDrawFunc() or nil if no such function has been installed.
+func (b *Box) GetDrawFunc() func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
+	return b.draw
+}
+
+// WrapInputHandler wraps an input handler (see InputHandler()) with the
+// functionality to capture input (see SetInputCapture()) before passing it
+// on to the provided (default) input handler.
+//
+// This is only meant to be used by subclassing primitives.
+func (b *Box) WrapInputHandler(inputHandler func(*tcell.EventKey, func(p Primitive))) func(*tcell.EventKey, func(p Primitive)) {
+	return func(event *tcell.EventKey, setFocus func(p Primitive)) {
+		if b.inputCapture != nil {
+			event = b.inputCapture(event)
+		}
+		if event != nil && inputHandler != nil {
+			inputHandler(event, setFocus)
+		}
+	}
+}
+
 // InputHandler returns nil.
 func (b *Box) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
-	return nil
+	return b.WrapInputHandler(nil)
+}
+
+// SetInputCapture installs a function which captures key events before they are
+// forwarded to the primitive's default key event handler. This function can
+// then choose to forward that key event (or a different one) to the default
+// handler by returning it. If nil is returned, the default handler will not
+// be called.
+//
+// Providing a nil handler will remove a previously existing handler.
+func (b *Box) SetInputCapture(capture func(event *tcell.EventKey) *tcell.EventKey) *Box {
+	b.inputCapture = capture
+	return b
+}
+
+// GetInputCapture returns the function installed with SetInputCapture() or nil
+// if no such function has been installed.
+func (b *Box) GetInputCapture() func(event *tcell.EventKey) *tcell.EventKey {
+	return b.inputCapture
 }
 
 // SetBackgroundColor sets the box's background color.
@@ -148,9 +223,11 @@ func (b *Box) Draw(screen tcell.Screen) {
 
 	// Fill background.
 	background := def.Background(b.backgroundColor)
-	for y := b.y; y < b.y+b.height; y++ {
-		for x := b.x; x < b.x+b.width; x++ {
-			screen.SetContent(x, y, ' ', nil, background)
+	if b.backgroundColor != tcell.ColorDefault {
+		for y := b.y; y < b.y+b.height; y++ {
+			for x := b.x; x < b.x+b.width; x++ {
+				screen.SetContent(x, y, ' ', nil, background)
+			}
 		}
 	}
 
@@ -159,27 +236,27 @@ func (b *Box) Draw(screen tcell.Screen) {
 		border := background.Foreground(b.borderColor)
 		var vertical, horizontal, topLeft, topRight, bottomLeft, bottomRight rune
 		if b.focus.HasFocus() {
-			vertical = GraphicsDbVertBar
-			horizontal = GraphicsDbHorBar
-			topLeft = GraphicsDbTopLeftCorner
-			topRight = GraphicsDbTopRightCorner
-			bottomLeft = GraphicsDbBottomLeftCorner
-			bottomRight = GraphicsDbBottomRightCorner
+			horizontal = Borders.HorizontalFocus
+			vertical = Borders.VerticalFocus
+			topLeft = Borders.TopLeftFocus
+			topRight = Borders.TopRightFocus
+			bottomLeft = Borders.BottomLeftFocus
+			bottomRight = Borders.BottomRightFocus
 		} else {
-			vertical = GraphicsHoriBar
-			horizontal = GraphicsVertBar
-			topLeft = GraphicsTopLeftCorner
-			topRight = GraphicsTopRightCorner
-			bottomLeft = GraphicsBottomLeftCorner
-			bottomRight = GraphicsBottomRightCorner
+			horizontal = Borders.Horizontal
+			vertical = Borders.Vertical
+			topLeft = Borders.TopLeft
+			topRight = Borders.TopRight
+			bottomLeft = Borders.BottomLeft
+			bottomRight = Borders.BottomRight
 		}
 		for x := b.x + 1; x < b.x+b.width-1; x++ {
-			screen.SetContent(x, b.y, vertical, nil, border)
-			screen.SetContent(x, b.y+b.height-1, vertical, nil, border)
+			screen.SetContent(x, b.y, horizontal, nil, border)
+			screen.SetContent(x, b.y+b.height-1, horizontal, nil, border)
 		}
 		for y := b.y + 1; y < b.y+b.height-1; y++ {
-			screen.SetContent(b.x, y, horizontal, nil, border)
-			screen.SetContent(b.x+b.width-1, y, horizontal, nil, border)
+			screen.SetContent(b.x, y, vertical, nil, border)
+			screen.SetContent(b.x+b.width-1, y, vertical, nil, border)
 		}
 		screen.SetContent(b.x, b.y, topLeft, nil, border)
 		screen.SetContent(b.x+b.width-1, b.y, topRight, nil, border)
@@ -188,23 +265,40 @@ func (b *Box) Draw(screen tcell.Screen) {
 
 		// Draw title.
 		if b.title != "" && b.width >= 4 {
-			width := b.width - 2
-			title := b.title
-			titleWidth := runewidth.StringWidth(title)
-			if width < titleWidth && width > 0 {
-				// Grow title until we hit the end.
-				abbrWidth := runewidth.RuneWidth(GraphicsEllipsis)
-				abbrPos := 0
-				for pos, ch := range title {
-					if abbrWidth >= width {
-						title = title[:abbrPos] + string(GraphicsEllipsis)
-						break
-					}
-					abbrWidth += runewidth.RuneWidth(ch)
-					abbrPos = pos
-				}
+			_, printed := Print(screen, b.title, b.x+1, b.y, b.width-2, b.titleAlign, b.titleColor)
+			if StringWidth(b.title)-printed > 0 && printed > 0 {
+				_, _, style, _ := screen.GetContent(b.x+b.width-2, b.y)
+				fg, _, _ := style.Decompose()
+				Print(screen, string(SemigraphicsHorizontalEllipsis), b.x+b.width-2, b.y, 1, AlignLeft, fg)
 			}
-			Print(screen, title, b.x+1, b.y, width, b.titleAlign, b.titleColor)
+		}
+	}
+
+	// Call custom draw function.
+	if b.draw != nil {
+		b.innerX, b.innerY, b.innerWidth, b.innerHeight = b.draw(screen, b.x, b.y, b.width, b.height)
+	} else {
+		// Remember the inner rect.
+		b.innerX = -1
+		b.innerX, b.innerY, b.innerWidth, b.innerHeight = b.GetInnerRect()
+	}
+
+	// Clamp inner rect to screen.
+	if b.clampToScreen {
+		width, height := screen.Size()
+		if b.innerX < 0 {
+			b.innerWidth += b.innerX
+			b.innerX = 0
+		}
+		if b.innerX+b.innerWidth >= width {
+			b.innerWidth = width - b.innerX
+		}
+		if b.innerY+b.innerHeight >= height {
+			b.innerHeight = height - b.innerY
+		}
+		if b.innerY < 0 {
+			b.innerHeight += b.innerY
+			b.innerY = 0
 		}
 	}
 }
